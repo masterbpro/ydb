@@ -1,7 +1,9 @@
 #pragma once
 
 #include <ydb/core/protos/kqp_physical.pb.h>
+#include <ydb/core/protos/kqp.pb.h>
 
+#include <util/datetime/base.h>
 #include <util/generic/string.h>
 #include <util/stream/output.h>
 #include <yql/essentials/public/issue/yql_issue.h>
@@ -59,6 +61,16 @@ public:
     static void LogCompleted(const TKqpQueryState& state,
                              const NKikimrKqp::TEvQueryResponse& record,
                              const TString& reqId);
+
+    // For scripting queries forwarded to KqpWorkerActor: RequestEv is released
+    // before the response arrives, so we log using saved fields instead.
+    static void LogForwardedCompleted(const TString& queryText,
+                                      const TString& database,
+                                      NKikimrKqp::EQueryType queryType,
+                                      NKikimrKqp::EQueryAction queryAction,
+                                      TInstant startTime,
+                                      const NKikimrKqp::TEvQueryResponse& record,
+                                      const TString& reqId);
 
 private:
     TAction Action;

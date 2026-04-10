@@ -23,6 +23,14 @@ constexpr TStringBuf SENSITIVE_QUERY_PLACEHOLDER =
 
 #define _KQP_REQ_LOG(stream) LOG_TRACE_S(*TlsActivationContext, NKikimrServices::KQP_REQUEST, "[REQ_JSON] " << stream)
 
+struct TTableStat {
+    TString Path;
+    ui64 ReadRows = 0;
+    ui64 ReadBytes = 0;
+    ui64 WriteRows = 0;
+    ui64 WriteBytes = 0;
+};
+
 struct TJsonExtra {
     TStringBuf Database;
     TString QueryType;
@@ -36,6 +44,14 @@ struct TJsonExtra {
     i64 DurationMs = -1;
     i64 CpuTimeUs = -1;
     i8 CompileCacheHit = -1; // -1 unknown, 0 miss, 1 hit
+    // Execution stats (completed-only)
+    ui64 ReadRows = 0;
+    ui64 ReadBytes = 0;
+    ui64 WriteRows = 0;
+    ui64 WriteBytes = 0;
+    ui64 AffectedShards = 0;
+    ui64 ConsumedRu = 0;
+    TVector<TTableStat> Tables;
 };
 
 void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf sessionId, TStringBuf userSID,
@@ -76,6 +92,7 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
 
         json.WriteKey("request").BeginObject();
         json.WriteKey("event").WriteString(eventName);
+        json.WriteKey("chunk").WriteInt(i + 1);
 
         if (!chunks[i].empty()) {
             json.WriteKey("data").WriteString(chunks[i]);
@@ -120,6 +137,45 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
             if (extra.CompileCacheHit >= 0) {
                 json.WriteKey("compile_cache_hit").WriteBool(extra.CompileCacheHit == 1);
             }
+            if (extra.ReadRows > 0) {
+                json.WriteKey("read_rows").WriteULongLong(extra.ReadRows);
+            }
+            if (extra.ReadBytes > 0) {
+                json.WriteKey("read_bytes").WriteULongLong(extra.ReadBytes);
+            }
+            if (extra.WriteRows > 0) {
+                json.WriteKey("write_rows").WriteULongLong(extra.WriteRows);
+            }
+            if (extra.WriteBytes > 0) {
+                json.WriteKey("write_bytes").WriteULongLong(extra.WriteBytes);
+            }
+            if (extra.AffectedShards > 0) {
+                json.WriteKey("affected_shards").WriteULongLong(extra.AffectedShards);
+            }
+            if (extra.ConsumedRu > 0) {
+                json.WriteKey("consumed_ru").WriteULongLong(extra.ConsumedRu);
+            }
+            if (!extra.Tables.empty()) {
+                json.WriteKey("tables").BeginList();
+                for (const auto& t : extra.Tables) {
+                    json.BeginObject();
+                    json.WriteKey("path").WriteString(t.Path);
+                    if (t.ReadRows > 0) {
+                        json.WriteKey("read_rows").WriteULongLong(t.ReadRows);
+                    }
+                    if (t.ReadBytes > 0) {
+                        json.WriteKey("read_bytes").WriteULongLong(t.ReadBytes);
+                    }
+                    if (t.WriteRows > 0) {
+                        json.WriteKey("write_rows").WriteULongLong(t.WriteRows);
+                    }
+                    if (t.WriteBytes > 0) {
+                        json.WriteKey("write_bytes").WriteULongLong(t.WriteBytes);
+                    }
+                    json.EndObject();
+                }
+                json.EndList();
+            }
         }
 
         json.EndObject();
@@ -140,6 +196,13 @@ TString MakeRequestId(const TKqpQueryState& state) {
     }
 
     return res;
+}
+
+// Internal AST types produced by KqpWorkerActor after compiling a scripting query.
+// These are not logged: the original SQL text is already in the scripting query log entry.
+bool IsAstQueryType(NKikimrKqp::EQueryType type) {
+    return type == NKikimrKqp::QUERY_TYPE_AST_DML
+        || type == NKikimrKqp::QUERY_TYPE_AST_SCAN;
 }
 
 } // anonymous namespace
@@ -164,6 +227,12 @@ TString MaskSensitiveLiterals(const TString& query) {
 }
 
 TString TLogQuery::LogStarted(const TKqpQueryState& state) {
+    if (IsAstQueryType(state.GetType())) {
+        // AST queries are compiled from scripting queries — suppress "started" to avoid
+        // duplicate logging; "completed" will be emitted using the scripting query req_id.
+        return {};
+    }
+
     TString reqId = MakeRequestId(state);
 
     TLogQuery log([&state, reqId]() {
@@ -214,6 +283,10 @@ TString TLogQuery::LogStarted(const TKqpQueryState& state) {
 void TLogQuery::LogCompleted(const TKqpQueryState& state,
                               const NKikimrKqp::TEvQueryResponse& record,
                               const TString& reqId) {
+    if (IsAstQueryType(state.GetType())) {
+        return;
+    }
+
     TLogQuery log([&state, &record, &reqId]() {
         TStringBuf sessionId = state.UserRequestContext
             ? TStringBuf(state.UserRequestContext->SessionId)
@@ -264,6 +337,29 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
         extra.DurationMs = (TActivationContext::Now() - state.StartTime).MilliSeconds();
         extra.CpuTimeUs = state.CpuTime.MicroSeconds();
         extra.CompileCacheHit = state.CompileStats.FromCache ? 1 : 0;
+        extra.ConsumedRu = record.GetConsumedRu();
+
+        // Collect per-table execution stats and aggregate totals
+        THashMap<TString, TTableStat> tableMap;
+        for (const auto& exec : state.QueryStats.Executions) {
+            for (const auto& table : exec.GetTables()) {
+                auto& ts = tableMap[table.GetTablePath()];
+                ts.Path = table.GetTablePath();
+                ts.ReadRows += table.GetReadRows();
+                ts.ReadBytes += table.GetReadBytes();
+                ts.WriteRows += table.GetWriteRows();
+                ts.WriteBytes += table.GetWriteBytes();
+                extra.ReadRows += table.GetReadRows();
+                extra.ReadBytes += table.GetReadBytes();
+                extra.WriteRows += table.GetWriteRows();
+                extra.WriteBytes += table.GetWriteBytes();
+                extra.AffectedShards += table.GetAffectedPartitions();
+            }
+        }
+        extra.Tables.reserve(tableMap.size());
+        for (auto& [_, ts] : tableMap) {
+            extra.Tables.push_back(std::move(ts));
+        }
 
         WriteJsonChunks(
             poolId,
@@ -275,6 +371,35 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
             issues,
             extra
         );
+    });
+    log.Log();
+}
+
+void TLogQuery::LogForwardedCompleted(const TString& queryText,
+                                       const TString& database,
+                                       NKikimrKqp::EQueryType queryType,
+                                       NKikimrKqp::EQueryAction queryAction,
+                                       TInstant startTime,
+                                       const NKikimrKqp::TEvQueryResponse& record,
+                                       const TString& reqId) {
+    TLogQuery log([&]() {
+        TJsonExtra extra;
+        extra.Database = database;
+        extra.QueryType = NKikimrKqp::EQueryType_Name(queryType);
+        extra.Action = NKikimrKqp::EQueryAction_Name(queryAction);
+        extra.Status = Ydb::StatusIds::StatusCode_Name(record.GetYdbStatus());
+        extra.DurationMs = (TActivationContext::Now() - startTime).MilliSeconds();
+
+        NYql::TIssues issues;
+        TStringBuf poolId;
+        if (record.HasResponse()) {
+            poolId = TStringBuf(record.GetResponse().GetEffectivePoolId());
+            NYql::IssuesFromMessage(record.GetResponse().GetQueryIssues(), issues);
+        }
+
+        TString loggedText = IsQueryAllowedToLog(queryText) ? queryText : TString(SENSITIVE_QUERY_PLACEHOLDER);
+
+        WriteJsonChunks(poolId, reqId, {}, {}, "completed", loggedText, issues, extra);
     });
     log.Log();
 }
