@@ -518,7 +518,9 @@ public:
             (pool_id, QueryState->UserRequestContext->PoolId),
             (trace_id, TraceId()));
 
-        KQP_REQ_LOG(TLogQuery::Started(*QueryState));
+        if (KQP_REQ_LOG_ENABLED()) {
+            CurrentReqLogId = TLogQuery::LogStarted(*QueryState);
+        }
 
         switch (action) {
             case NKikimrKqp::QUERY_ACTION_EXPLAIN:
@@ -3062,7 +3064,9 @@ public:
             TlsActivationContext->AsActorContext()
         );
 
-        KQP_REQ_LOG(TLogQuery::Completed(*QueryState, record));
+        if (KQP_REQ_LOG_ENABLED()) {
+            TLogQuery::LogCompleted(*QueryState, record, CurrentReqLogId);
+        }
 
         Send<ESendingType::Tail>(QueryState->Sender, QueryResponse.release(), 0, QueryState->ProxyRequestId);
         STLOG_D("Sent query response back to proxy",
@@ -3767,6 +3771,7 @@ private:
 
     std::shared_ptr<TKqpQueryState> QueryState;
     std::unique_ptr<TKqpCleanupCtx> CleanupCtx;
+    TString CurrentReqLogId;
     ui32 QueryId = 0;
     TIntrusiveConstPtr<TKikimrConfiguration> Config;
     IDataProvider::TFillSettings FillSettings;

@@ -5,6 +5,7 @@
 #include <ydb/core/protos/kqp.pb.h>
 
 #include <library/cpp/json/writer/json.h>
+#include <util/charset/utf8.h>
 #include <yql/essentials/public/issue/yql_issue_message.h>
 
 namespace NKikimr::NKqp {
@@ -14,12 +15,44 @@ constexpr size_t SQL_TEXT_MAX_SIZE = 4000;
 
 #define _KQP_REQ_LOG(stream) LOG_TRACE_S(*TlsActivationContext, NKikimrServices::KQP_REQUEST, "[REQ_JSON] " << stream)
 
-void WriteJsonChunks(TStringBuf poolId, TString reqId, TStringBuf sessionId, TStringBuf userSID,
-                     TStringBuf eventName, TStringBuf requestText, 
-                     const NYql::TIssues& issues) 
+struct TJsonExtra {
+    TStringBuf Database;
+    TString QueryType;
+    TString Action;
+    TString ApplicationName;
+    TStringBuf ClientAddress;
+    TString CommandTag;
+    ui64 ParametersSize = 0;
+    // Completed-only fields
+    TString Status;
+    i64 DurationMs = -1;
+    i64 CpuTimeUs = -1;
+    i8 CompileCacheHit = -1; // -1 unknown, 0 miss, 1 hit
+};
+
+void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf sessionId, TStringBuf userSID,
+                     TStringBuf eventName, TStringBuf requestText,
+                     const NYql::TIssues& issues,
+                     const TJsonExtra& extra)
 {
-    const size_t total = requestText.empty() ? 1 :
-        (requestText.size() + SQL_TEXT_MAX_SIZE - 1) / SQL_TEXT_MAX_SIZE;
+    // Split requestText into UTF-8-safe chunks using standard Utf8TruncateRobust
+    std::vector<TStringBuf> chunks;
+    if (requestText.empty()) {
+        chunks.emplace_back();
+    } else {
+        TStringBuf remaining = requestText;
+        while (!remaining.empty()) {
+            TStringBuf chunk = Utf8TruncateRobust(remaining, SQL_TEXT_MAX_SIZE);
+            if (chunk.empty()) {
+                // Degenerate case: first byte is invalid UTF-8, skip it to make progress
+                chunk = remaining.Head(std::min(remaining.size(), SQL_TEXT_MAX_SIZE));
+            }
+            chunks.push_back(chunk);
+            remaining.Skip(chunk.size());
+        }
+    }
+
+    const size_t total = chunks.size();
 
     for (size_t i = 0; i < total; ++i) {
         TStringStream ss;
@@ -32,18 +65,55 @@ void WriteJsonChunks(TStringBuf poolId, TString reqId, TStringBuf sessionId, TSt
         json.WriteKey("user").WriteString(userSID);
         json.WriteKey("part").WriteInt(i + 1);
         json.WriteKey("total").WriteInt(total);
-            
+
         json.WriteKey("request").BeginObject();
         json.WriteKey("event").WriteString(eventName);
-        
-        if (!requestText.empty()) {
-            json.WriteKey("data").WriteString(requestText.SubStr(i * SQL_TEXT_MAX_SIZE, SQL_TEXT_MAX_SIZE));
+
+        if (!chunks[i].empty()) {
+            json.WriteKey("data").WriteString(chunks[i]);
         }
 
         if (!issues.Empty()) {
             json.WriteKey("issues").WriteString(issues.ToOneLineString());
         }
-        
+
+        // Write extra metadata only in the first chunk
+        if (i == 0) {
+            if (extra.Database) {
+                json.WriteKey("database").WriteString(extra.Database);
+            }
+            if (extra.QueryType) {
+                json.WriteKey("query_type").WriteString(extra.QueryType);
+            }
+            if (extra.Action) {
+                json.WriteKey("action").WriteString(extra.Action);
+            }
+            if (extra.ApplicationName) {
+                json.WriteKey("application").WriteString(extra.ApplicationName);
+            }
+            if (extra.ClientAddress) {
+                json.WriteKey("client_address").WriteString(extra.ClientAddress);
+            }
+            if (extra.CommandTag) {
+                json.WriteKey("command_tag").WriteString(extra.CommandTag);
+            }
+            if (extra.ParametersSize > 0) {
+                json.WriteKey("parameters_size").WriteULongLong(extra.ParametersSize);
+            }
+            if (extra.Status) {
+                json.WriteKey("status").WriteString(extra.Status);
+            }
+            if (extra.DurationMs >= 0) {
+                json.WriteKey("duration_ms").WriteLongLong(extra.DurationMs);
+            }
+            if (extra.CpuTimeUs >= 0) {
+                json.WriteKey("cpu_time_us").WriteLongLong(extra.CpuTimeUs);
+            }
+            if (extra.CompileCacheHit >= 0) {
+                json.WriteKey("compile_cache_hit").WriteBool(extra.CompileCacheHit == 1);
+            }
+        }
+
         json.EndObject();
         json.EndObject();
 
@@ -51,8 +121,8 @@ void WriteJsonChunks(TStringBuf poolId, TString reqId, TStringBuf sessionId, TSt
     }
 }
 
-TString GetRequestId(const TKqpQueryState& state) {
-    auto res = TStringBuilder() 
+TString MakeRequestId(const TKqpQueryState& state) {
+    auto res = TStringBuilder()
         << TActivationContext::Now().MicroSeconds() << "_";
 
     if (state.RequestEv) {
@@ -60,15 +130,17 @@ TString GetRequestId(const TKqpQueryState& state) {
     } else {
         res << (const void*)&state;
     }
-    
+
     return res;
 }
 
 } // anonymous namespace
 
-TLogQuery TLogQuery::Started(const TKqpQueryState& state) {
-    return TLogQuery([&state]() {
-        TStringBuf poolId = state.UserRequestContext 
+TString TLogQuery::LogStarted(const TKqpQueryState& state) {
+    TString reqId = MakeRequestId(state);
+
+    TLogQuery log([&state, reqId]() {
+        TStringBuf poolId = state.UserRequestContext
             ? TStringBuf(state.UserRequestContext->PoolId)
             : TStringBuf{};
 
@@ -76,27 +148,42 @@ TLogQuery TLogQuery::Started(const TKqpQueryState& state) {
             ? TStringBuf(state.UserRequestContext->SessionId)
             : TStringBuf{};
 
-        TString userSid = state.UserToken 
+        TString userSid = state.UserToken
             ? state.UserToken->GetUserSID()
             : TString{};
 
         auto query = state.ExtractQueryText();
 
+        TJsonExtra extra;
+        extra.Database = state.GetDatabase();
+        extra.QueryType = NKikimrKqp::EQueryType_Name(state.GetType());
+        extra.Action = NKikimrKqp::EQueryAction_Name(state.GetAction());
+        extra.ApplicationName = state.ApplicationName.GetOrElse(TString{});
+        extra.ClientAddress = state.ClientAddress;
+        if (state.CommandTagName) {
+            extra.CommandTag = *state.CommandTagName;
+        }
+        extra.ParametersSize = state.ParametersSize;
+
         WriteJsonChunks(
             poolId,
-            GetRequestId(state),
+            reqId,
             sessionId,
             userSid,
             "started",
             query,
-            {}
+            {},
+            extra
         );
     });
+    log.Log();
+    return reqId;
 }
 
-TLogQuery TLogQuery::Completed(const TKqpQueryState& state,
-                               const NKikimrKqp::TEvQueryResponse& record) {
-    return TLogQuery([&state, &record]() {
+void TLogQuery::LogCompleted(const TKqpQueryState& state,
+                              const NKikimrKqp::TEvQueryResponse& record,
+                              const TString& reqId) {
+    TLogQuery log([&state, &record, &reqId]() {
         TStringBuf sessionId = state.UserRequestContext
             ? TStringBuf(state.UserRequestContext->SessionId)
             : TStringBuf{};
@@ -119,16 +206,33 @@ TLogQuery TLogQuery::Completed(const TKqpQueryState& state,
                 : TStringBuf{};
         }
 
+        TJsonExtra extra;
+        extra.Database = state.GetDatabase();
+        extra.QueryType = NKikimrKqp::EQueryType_Name(state.GetType());
+        extra.Action = NKikimrKqp::EQueryAction_Name(state.GetAction());
+        extra.ApplicationName = state.ApplicationName.GetOrElse(TString{});
+        extra.ClientAddress = state.ClientAddress;
+        if (state.CommandTagName) {
+            extra.CommandTag = *state.CommandTagName;
+        }
+        extra.ParametersSize = state.ParametersSize;
+        extra.Status = Ydb::StatusIds::StatusCode_Name(record.GetYdbStatus());
+        extra.DurationMs = (TActivationContext::Now() - state.StartTime).MilliSeconds();
+        extra.CpuTimeUs = state.CpuTime.MicroSeconds();
+        extra.CompileCacheHit = state.CompileStats.FromCache ? 1 : 0;
+
         WriteJsonChunks(
             poolId,
-            GetRequestId(state),
+            reqId,
             sessionId,
             userSID,
             "completed",
             queryText,
-            issues
+            issues,
+            extra
         );
     });
+    log.Log();
 }
 
 } // namespace NKikimr::NKqp

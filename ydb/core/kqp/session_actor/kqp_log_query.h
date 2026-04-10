@@ -4,7 +4,6 @@
 #include <util/stream/output.h>
 #include <yql/essentials/public/issue/yql_issue.h>
 
-#include <util/stream/output.h>
 #include <functional>
 
 namespace NKikimrKqp {
@@ -25,20 +24,18 @@ public:
 
     void Log() const { if (Action) Action(); }
 
-    static TLogQuery Started(const TKqpQueryState& state);
+    // Logs "started" event, returns the generated req_id for correlation with Completed
+    static TString LogStarted(const TKqpQueryState& state);
 
-    static TLogQuery Completed(const TKqpQueryState& state,
-                               const NKikimrKqp::TEvQueryResponse& record);
+    static void LogCompleted(const TKqpQueryState& state,
+                             const NKikimrKqp::TEvQueryResponse& record,
+                             const TString& reqId);
 
 private:
     TAction Action;
 };
 
-#define KQP_REQ_LOG(logQuery) \
-    do { \
-        if (IS_CTX_LOG_PRIORITY_ENABLED(*TlsActivationContext, NActors::NLog::PRI_TRACE, NKikimrServices::KQP_REQUEST, 0ull)) { \
-            (logQuery).Log(); \
-        } \
-    } while (0)
+#define KQP_REQ_LOG_ENABLED() \
+    IS_CTX_LOG_PRIORITY_ENABLED(*TlsActivationContext, NActors::NLog::PRI_TRACE, NKikimrServices::KQP_REQUEST, 0ull)
 
 } // namespace NKikimr::NKqp
