@@ -1949,6 +1949,54 @@ Y_UNIT_TEST(ObfuscatePragma) {
     setup.Run(cases, NSQLFormat::EFormatMode::Obfuscate);
 }
 
+Y_UNIT_TEST(ObfuscateWithStringMaskSelect) {
+    TCases cases = {
+        {"select 1;",
+         "SELECT\n\t1\n;\n"},
+        {"select true;",
+         "SELECT\n\tTRUE\n;\n"},
+        {"select 'foo';",
+         "SELECT\n\t'***removed***'\n;\n"},
+        {"select 3.0;",
+         "SELECT\n\t3.0\n;\n"},
+        {"select col;",
+         "SELECT\n\tcol\n;\n"},
+        {"select * from `logs/of/bob` where pwd='foo';",
+         "SELECT\n\t*\nFROM\n\t`logs/of/bob`\nWHERE\n\tpwd == '***removed***'\n;\n"},
+    };
+
+    TSetup setup;
+    setup.Run(cases, NSQLFormat::EFormatMode::ObfuscateWithStringMask);
+}
+
+Y_UNIT_TEST(ObfuscateWithStringMaskCreateUser) {
+    TCases cases = {
+        {"CREATE USER foo PASSWORD 'secret123';",
+         "CREATE USER foo PASSWORD '***removed***';\n"},
+        {"ALTER USER foo WITH PASSWORD 'newsecret';",
+         "ALTER USER foo WITH PASSWORD '***removed***';\n"},
+        {"CREATE USER foo ENCRYPTED PASSWORD 'secret';",
+         "CREATE USER foo ENCRYPTED PASSWORD '***removed***';\n"},
+    };
+
+    TSetup setup;
+    setup.Run(cases, NSQLFormat::EFormatMode::ObfuscateWithStringMask);
+}
+
+Y_UNIT_TEST(ObfuscateWithStringMaskPragma) {
+    TCases cases = {
+        {"pragma a=1",
+         "PRAGMA a = 1;\n"},
+        {"pragma a='foo';",
+         "PRAGMA a = '***removed***';\n"},
+        {"pragma a=true;",
+         "PRAGMA a = TRUE;\n"},
+    };
+
+    TSetup setup;
+    setup.Run(cases, NSQLFormat::EFormatMode::ObfuscateWithStringMask);
+}
+
 Y_UNIT_TEST(CreateView) {
     TCases cases = {{"creAte vIEw TheView As SELect 1",
                      "CREATE VIEW TheView AS\nSELECT\n\t1\n;\n"},

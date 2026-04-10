@@ -10,6 +10,7 @@ SRCS(
 
 PEERDIR(
     util/charset
+    ydb/core/protos
 )
 
 END()

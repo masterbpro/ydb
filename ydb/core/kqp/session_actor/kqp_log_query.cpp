@@ -1,4 +1,5 @@
 #include "kqp_log_query.h"
+#include "kqp_worker_common.h"
 
 #include <ydb/core/kqp/common/events/query.h>
 #include <ydb/core/kqp/session_actor/kqp_query_state.h>
@@ -7,11 +8,18 @@
 #include <library/cpp/json/writer/json.h>
 #include <util/charset/utf8.h>
 #include <yql/essentials/public/issue/yql_issue_message.h>
+#include <yql/essentials/sql/v1/format/sql_format.h>
+#include <yql/essentials/sql/v1/lexer/antlr4/lexer.h>
+#include <yql/essentials/sql/v1/lexer/antlr4_ansi/lexer.h>
+#include <yql/essentials/sql/v1/proto_parser/antlr4/proto_parser.h>
+#include <yql/essentials/sql/v1/proto_parser/antlr4_ansi/proto_parser.h>
 
 namespace NKikimr::NKqp {
 namespace {
 
 constexpr size_t SQL_TEXT_MAX_SIZE = 4000;
+constexpr TStringBuf SENSITIVE_QUERY_PLACEHOLDER =
+    "[query may contain sensitive data, text is not shown]";
 
 #define _KQP_REQ_LOG(stream) LOG_TRACE_S(*TlsActivationContext, NKikimrServices::KQP_REQUEST, "[REQ_JSON] " << stream)
 
@@ -136,6 +144,25 @@ TString MakeRequestId(const TKqpQueryState& state) {
 
 } // anonymous namespace
 
+TString MaskSensitiveLiterals(const TString& query) {
+    static NSQLTranslationV1::TLexers lexers = {
+        .Antlr4 = NSQLTranslationV1::MakeAntlr4LexerFactory(),
+        .Antlr4Ansi = NSQLTranslationV1::MakeAntlr4AnsiLexerFactory(),
+    };
+    static NSQLTranslationV1::TParsers parsers = {
+        .Antlr4 = NSQLTranslationV1::MakeAntlr4ParserFactory(),
+        .Antlr4Ansi = NSQLTranslationV1::MakeAntlr4AnsiParserFactory(),
+    };
+    static auto formatter = NSQLFormat::MakeSqlFormatter(lexers, parsers);
+
+    TString masked;
+    NYql::TIssues issues;
+    if (formatter->Format(query, masked, issues, NSQLFormat::EFormatMode::ObfuscateWithStringMask)) {
+        return masked;
+    }
+    return query;
+}
+
 TString TLogQuery::LogStarted(const TKqpQueryState& state) {
     TString reqId = MakeRequestId(state);
 
@@ -154,6 +181,10 @@ TString TLogQuery::LogStarted(const TKqpQueryState& state) {
 
         auto query = state.ExtractQueryText();
 
+        TStringBuf queryText = IsQueryAllowedToLog(query)
+            ? TStringBuf(query)
+            : SENSITIVE_QUERY_PLACEHOLDER;
+
         TJsonExtra extra;
         extra.Database = state.GetDatabase();
         extra.QueryType = NKikimrKqp::EQueryType_Name(state.GetType());
@@ -171,7 +202,7 @@ TString TLogQuery::LogStarted(const TKqpQueryState& state) {
             sessionId,
             userSid,
             "started",
-            query,
+            queryText,
             {},
             extra
         );
@@ -192,7 +223,20 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
             ? state.UserToken->GetUserSID()
             : TString{};
 
-        auto queryText = state.ExtractQueryText();
+        auto query = state.ExtractQueryText();
+
+        TString queryText;
+        if (state.PreparedQuery) {
+            if (HasSensitiveSchemeOperation(state.PreparedQuery->GetPhysicalQuery())) {
+                queryText = MaskSensitiveLiterals(query);
+            } else {
+                queryText = query;
+            }
+        } else {
+            queryText = IsQueryAllowedToLog(query)
+                ? query
+                : TString(SENSITIVE_QUERY_PLACEHOLDER);
+        }
 
         NYql::TIssues issues;
         TStringBuf poolId;

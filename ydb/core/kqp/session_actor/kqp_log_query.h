@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ydb/core/protos/kqp_physical.pb.h>
+
 #include <util/generic/string.h>
 #include <util/stream/output.h>
 #include <yql/essentials/public/issue/yql_issue.h>
@@ -13,6 +15,33 @@ class TEvQueryResponse;
 namespace NKikimr::NKqp {
 
 class TKqpQueryState;
+
+// Replaces string literals in the SQL query with '***removed***' using
+// the SQL parser (EFormatMode::ObfuscateWithStringMask). If parsing fails,
+// returns the original query unchanged.
+TString MaskSensitiveLiterals(const TString& query);
+
+// Returns true if any transaction in the physical query contains a scheme operation
+// that may carry sensitive data (CREATE/ALTER USER, CREATE/ALTER SECRET,
+// CREATE/UPSERT/ALTER OBJECT with TYPE SECRET).
+inline bool HasSensitiveSchemeOperation(const NKqpProto::TKqpPhyQuery& phyQuery) {
+    for (const auto& tx : phyQuery.GetTransactions()) {
+        if (!tx.HasSchemeOperation()) {
+            continue;
+        }
+        const auto& op = tx.GetSchemeOperation();
+        if (op.HasCreateUser() || op.HasAlterUser() ||
+            op.HasCreateSecret() || op.HasAlterSecret()) {
+            return true;
+        }
+        if (op.HasCreateObject() || op.HasUpsertObject() || op.HasAlterObject()) {
+            if (op.GetObjectType() == "SECRET") {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 class TLogQuery {
 public:

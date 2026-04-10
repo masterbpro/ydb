@@ -13,7 +13,8 @@ constexpr ui32 OneIndent = 4;
 
 enum class EFormatMode {
     Pretty,
-    Obfuscate
+    Obfuscate,
+    ObfuscateWithStringMask, // replaces only string literals, keeps identifiers and numbers
 };
 
 class ISqlFormatter {

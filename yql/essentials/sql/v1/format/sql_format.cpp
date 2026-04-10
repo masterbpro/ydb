@@ -194,6 +194,8 @@ class TPrettyVisitor;
 using TPrettyFunctor = std::function<void(TPrettyVisitor&, const NProtoBuf::Message& msg)>;
 class TObfuscatingVisitor;
 using TObfuscatingFunctor = std::function<void(TObfuscatingVisitor&, const NProtoBuf::Message& msg)>;
+class TStringMaskVisitor;
+using TStringMaskFunctor = std::function<void(TStringMaskVisitor&, const NProtoBuf::Message& msg)>;
 
 struct TStaticData {
     TStaticData();
@@ -205,6 +207,7 @@ struct TStaticData {
     THashMap<const NProtoBuf::Descriptor*, EScope> ScopeDispatch;
     THashMap<const NProtoBuf::Descriptor*, TPrettyFunctor> PrettyVisitDispatch;
     THashMap<const NProtoBuf::Descriptor*, TObfuscatingFunctor> ObfuscatingVisitDispatch;
+    THashMap<const NProtoBuf::Descriptor*, TStringMaskFunctor> StringMaskVisitDispatch;
 };
 
 template <typename T, void (T::*Func)(const NProtoBuf::Message&)>
@@ -416,6 +419,59 @@ private:
     TMaybe<TString> NextToken_;
     TVector<EScope> Scopes_;
     bool FuncCall_ = false;
+};
+
+class TStringMaskVisitor {
+    friend struct TStaticData;
+
+public:
+    TStringMaskVisitor()
+        : StaticData_(TStaticData::GetInstance())
+    {
+    }
+
+    TString Process(const NProtoBuf::Message& msg) {
+        Visit(msg);
+        return Sb_;
+    }
+
+private:
+    void VisitToken(const TToken& token) {
+        auto str = token.GetValue();
+        if (str == "<EOF>") {
+            return;
+        }
+
+        if (!First_) {
+            Sb_ << ' ';
+        } else {
+            First_ = false;
+        }
+
+        if (str.size() >= 2 && (str.front() == '\'' || str.front() == '"')) {
+            Sb_ << str.front() << "***removed***" << str.front();
+        } else {
+            Sb_ << str;
+        }
+    }
+
+    void Visit(const NProtoBuf::Message& msg) {
+        const NProtoBuf::Descriptor* descr = msg.GetDescriptor();
+        auto funcPtr = StaticData_.StringMaskVisitDispatch.FindPtr(descr);
+        if (funcPtr) {
+            (*funcPtr)(*this, msg);
+        } else {
+            VisitAllFields(descr, msg);
+        }
+    }
+
+    void VisitAllFields(const NProtoBuf::Descriptor* descr, const NProtoBuf::Message& msg) {
+        VisitAllFieldsImpl<TStringMaskVisitor, &TStringMaskVisitor::Visit>(this, descr, msg);
+    }
+
+    const TStaticData& StaticData_;
+    TStringBuilder Sb_;
+    bool First_ = true;
 };
 
 class TPrettyVisitor {
@@ -3156,6 +3212,13 @@ TObfuscatingFunctor MakeObfuscatingFunctor(void (TObfuscatingVisitor::*memberPtr
     };
 }
 
+template <typename T>
+TStringMaskFunctor MakeStringMaskFunctor(void (TStringMaskVisitor::*memberPtr)(const T& msg)) {
+    return [memberPtr](TStringMaskVisitor& visitor, const NProtoBuf::Message& rawMsg) {
+        (visitor.*memberPtr)(dynamic_cast<const T&>(rawMsg));
+    };
+}
+
 TStaticData::TStaticData()
     : Keywords(GetKeywords())
     , ScopeDispatch({
@@ -3316,6 +3379,9 @@ TStaticData::TStaticData()
           {TRule_unary_casual_subexpr::GetDescriptor(), MakeObfuscatingFunctor(&TObfuscatingVisitor::VisitUnaryCasualSubexpr)},
           {TRule_in_unary_casual_subexpr::GetDescriptor(), MakeObfuscatingFunctor(&TObfuscatingVisitor::VisitInUnaryCasualSubexpr)},
       })
+    , StringMaskVisitDispatch({
+          {TToken::GetDescriptor(), MakeStringMaskFunctor(&TStringMaskVisitor::VisitToken)},
+      })
 {
     // ensure that all statements have a visitor
     auto coreDescr = TRule_sql_stmt_core::GetDescriptor();
@@ -3350,24 +3416,32 @@ public:
     }
 
     bool Format(const TString& query, TString& formattedQuery, NYql::TIssues& issues, EFormatMode mode) override {
-        formattedQuery = (mode == EFormatMode::Obfuscate) ? "" : query;
+        const bool needsAst = (mode == EFormatMode::Obfuscate || mode == EFormatMode::ObfuscateWithStringMask);
+        formattedQuery = needsAst ? "" : query;
         auto parsedSettings = Settings_;
         if (!NSQLTranslation::ParseTranslationSettings(query, parsedSettings, issues)) {
             return false;
         }
 
         if (parsedSettings.PgParser) {
-            return mode != EFormatMode::Obfuscate;
+            return !needsAst;
         }
 
-        if (mode == EFormatMode::Obfuscate) {
+        if (needsAst) {
             auto message = NSQLTranslationV1::SqlAST(Parsers_, query, parsedSettings.File, issues, NSQLTranslation::SQL_MAX_PARSER_ERRORS, parsedSettings.AnsiLexer, parsedSettings.Arena);
             if (!message) {
                 return false;
             }
 
-            TObfuscatingVisitor visitor;
-            return Format(visitor.Process(*message), formattedQuery, issues, EFormatMode::Pretty);
+            TString processed;
+            if (mode == EFormatMode::Obfuscate) {
+                TObfuscatingVisitor visitor;
+                processed = visitor.Process(*message);
+            } else {
+                TStringMaskVisitor visitor;
+                processed = visitor.Process(*message);
+            }
+            return Format(processed, formattedQuery, issues, EFormatMode::Pretty);
         }
 
         auto lexer = NSQLTranslationV1::MakeLexer(Lexers_, parsedSettings.AnsiLexer);

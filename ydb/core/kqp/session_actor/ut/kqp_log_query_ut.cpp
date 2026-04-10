@@ -1,3 +1,6 @@
+#include <ydb/core/kqp/session_actor/kqp_log_query.h>
+#include <ydb/core/protos/kqp_physical.pb.h>
+
 #include <util/charset/utf8.h>
 
 #include <library/cpp/testing/unittest/registar.h>
@@ -195,6 +198,108 @@ Y_UNIT_TEST_SUITE(Utf8ChunkingTest) {
             UNIT_ASSERT_VALUES_EQUAL(Utf8TruncateRobust(chunk, chunk.size()), chunk);
             remaining.Skip(chunk.size());
         }
+    }
+}
+
+Y_UNIT_TEST_SUITE(HasSensitiveSchemeOperationTest) {
+
+    namespace {
+    NKqpProto::TKqpPhyQuery MakeQueryWithSchemeOp(
+        std::function<void(NKqpProto::TKqpSchemeOperation&)> setupOp,
+        const TString& objectType = {})
+    {
+        NKqpProto::TKqpPhyQuery phyQuery;
+        auto* tx = phyQuery.AddTransactions();
+        tx->SetType(NKqpProto::TKqpPhyTx::TYPE_SCHEME);
+        auto* op = tx->MutableSchemeOperation();
+        if (objectType) {
+            op->SetObjectType(objectType);
+        }
+        setupOp(*op);
+        return phyQuery;
+    }
+    } // namespace
+
+    Y_UNIT_TEST(EmptyQuery) {
+        NKqpProto::TKqpPhyQuery phyQuery;
+        UNIT_ASSERT(!HasSensitiveSchemeOperation(phyQuery));
+    }
+
+    Y_UNIT_TEST(NoSchemeOperation) {
+        NKqpProto::TKqpPhyQuery phyQuery;
+        auto* tx = phyQuery.AddTransactions();
+        tx->SetType(NKqpProto::TKqpPhyTx::TYPE_COMPUTE);
+        UNIT_ASSERT(!HasSensitiveSchemeOperation(phyQuery));
+    }
+
+    Y_UNIT_TEST(CreateTableIsNotSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableCreateTable();
+        });
+        UNIT_ASSERT(!HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(CreateUserIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableCreateUser();
+        });
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(AlterUserIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableAlterUser();
+        });
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(CreateSecretIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableCreateSecret();
+        });
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(AlterSecretIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableAlterSecret();
+        });
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(CreateObjectSecretIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableCreateObject();
+        }, "SECRET");
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(UpsertObjectSecretIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableUpsertObject();
+        }, "SECRET");
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(AlterObjectSecretIsSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableAlterObject();
+        }, "SECRET");
+        UNIT_ASSERT(HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(CreateObjectNonSecretIsNotSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableCreateObject();
+        }, "EXTERNAL_DATA_SOURCE");
+        UNIT_ASSERT(!HasSensitiveSchemeOperation(query));
+    }
+
+    Y_UNIT_TEST(DropSecretIsNotSensitive) {
+        auto query = MakeQueryWithSchemeOp([](auto& op) {
+            op.MutableDropSecret();
+        });
+        UNIT_ASSERT(!HasSensitiveSchemeOperation(query));
     }
 }
 
