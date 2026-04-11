@@ -1,4 +1,5 @@
 #include "sql_format.h"
+#include "sql_format_string_mask.h"
 
 #include <yql/essentials/utils/yql_panic.h>
 #include <yql/essentials/sql/v1/proto_parser/parse_tree.h>
@@ -194,8 +195,6 @@ class TPrettyVisitor;
 using TPrettyFunctor = std::function<void(TPrettyVisitor&, const NProtoBuf::Message& msg)>;
 class TObfuscatingVisitor;
 using TObfuscatingFunctor = std::function<void(TObfuscatingVisitor&, const NProtoBuf::Message& msg)>;
-class TStringMaskVisitor;
-using TStringMaskFunctor = std::function<void(TStringMaskVisitor&, const NProtoBuf::Message& msg)>;
 
 struct TStaticData {
     TStaticData();
@@ -207,7 +206,6 @@ struct TStaticData {
     THashMap<const NProtoBuf::Descriptor*, EScope> ScopeDispatch;
     THashMap<const NProtoBuf::Descriptor*, TPrettyFunctor> PrettyVisitDispatch;
     THashMap<const NProtoBuf::Descriptor*, TObfuscatingFunctor> ObfuscatingVisitDispatch;
-    THashMap<const NProtoBuf::Descriptor*, TStringMaskFunctor> StringMaskVisitDispatch;
 };
 
 template <typename T, void (T::*Func)(const NProtoBuf::Message&)>
@@ -419,59 +417,6 @@ private:
     TMaybe<TString> NextToken_;
     TVector<EScope> Scopes_;
     bool FuncCall_ = false;
-};
-
-class TStringMaskVisitor {
-    friend struct TStaticData;
-
-public:
-    TStringMaskVisitor()
-        : StaticData_(TStaticData::GetInstance())
-    {
-    }
-
-    TString Process(const NProtoBuf::Message& msg) {
-        Visit(msg);
-        return Sb_;
-    }
-
-private:
-    void VisitToken(const TToken& token) {
-        auto str = token.GetValue();
-        if (str == "<EOF>") {
-            return;
-        }
-
-        if (!First_) {
-            Sb_ << ' ';
-        } else {
-            First_ = false;
-        }
-
-        if (str.size() >= 2 && (str.front() == '\'' || str.front() == '"')) {
-            Sb_ << str.front() << "***removed***" << str.front();
-        } else {
-            Sb_ << str;
-        }
-    }
-
-    void Visit(const NProtoBuf::Message& msg) {
-        const NProtoBuf::Descriptor* descr = msg.GetDescriptor();
-        auto funcPtr = StaticData_.StringMaskVisitDispatch.FindPtr(descr);
-        if (funcPtr) {
-            (*funcPtr)(*this, msg);
-        } else {
-            VisitAllFields(descr, msg);
-        }
-    }
-
-    void VisitAllFields(const NProtoBuf::Descriptor* descr, const NProtoBuf::Message& msg) {
-        VisitAllFieldsImpl<TStringMaskVisitor, &TStringMaskVisitor::Visit>(this, descr, msg);
-    }
-
-    const TStaticData& StaticData_;
-    TStringBuilder Sb_;
-    bool First_ = true;
 };
 
 class TPrettyVisitor {
@@ -3212,13 +3157,6 @@ TObfuscatingFunctor MakeObfuscatingFunctor(void (TObfuscatingVisitor::*memberPtr
     };
 }
 
-template <typename T>
-TStringMaskFunctor MakeStringMaskFunctor(void (TStringMaskVisitor::*memberPtr)(const T& msg)) {
-    return [memberPtr](TStringMaskVisitor& visitor, const NProtoBuf::Message& rawMsg) {
-        (visitor.*memberPtr)(dynamic_cast<const T&>(rawMsg));
-    };
-}
-
 TStaticData::TStaticData()
     : Keywords(GetKeywords())
     , ScopeDispatch({
@@ -3379,9 +3317,6 @@ TStaticData::TStaticData()
           {TRule_unary_casual_subexpr::GetDescriptor(), MakeObfuscatingFunctor(&TObfuscatingVisitor::VisitUnaryCasualSubexpr)},
           {TRule_in_unary_casual_subexpr::GetDescriptor(), MakeObfuscatingFunctor(&TObfuscatingVisitor::VisitInUnaryCasualSubexpr)},
       })
-    , StringMaskVisitDispatch({
-          {TToken::GetDescriptor(), MakeStringMaskFunctor(&TStringMaskVisitor::VisitToken)},
-      })
 {
     // ensure that all statements have a visitor
     auto coreDescr = TRule_sql_stmt_core::GetDescriptor();
@@ -3438,8 +3373,7 @@ public:
                 TObfuscatingVisitor visitor;
                 processed = visitor.Process(*message);
             } else {
-                TStringMaskVisitor visitor;
-                processed = visitor.Process(*message);
+                processed = MaskSqlStringLiterals(*message);
             }
             return Format(processed, formattedQuery, issues, EFormatMode::Pretty);
         }

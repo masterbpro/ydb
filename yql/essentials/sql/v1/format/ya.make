@@ -2,6 +2,7 @@ LIBRARY()
 
 SRCS(
     sql_format.cpp
+    sql_format_string_mask.cpp
 )
 
 RESOURCE(DONT_PARSE yql/essentials/sql/v1/SQLv1Antlr4.g.in SQLv1Antlr4.g.in)

@@ -1963,6 +1963,10 @@ Y_UNIT_TEST(ObfuscateWithStringMaskSelect) {
          "SELECT\n\tcol\n;\n"},
         {"select * from `logs/of/bob` where pwd='foo';",
          "SELECT\n\t*\nFROM\n\t`logs/of/bob`\nWHERE\n\tpwd == '***removed***'\n;\n"},
+        {"select \"foo\";",
+         "SELECT\n\t'***removed***'\n;\n"},
+        {"select @@multi\nline@@;",
+         "SELECT\n\t'***removed***'\n;\n"},
     };
 
     TSetup setup;
@@ -1977,6 +1981,12 @@ Y_UNIT_TEST(ObfuscateWithStringMaskCreateUser) {
          "ALTER USER foo WITH PASSWORD '***removed***';\n"},
         {"CREATE USER foo ENCRYPTED PASSWORD 'secret';",
          "CREATE USER foo ENCRYPTED PASSWORD '***removed***';\n"},
+        {"CREATE USER foo PASSWORD \"secret\";",
+         "CREATE USER foo PASSWORD '***removed***';\n"},
+        {"CREATE USER foo PASSWORD @@secret@@;",
+         "CREATE USER foo PASSWORD '***removed***';\n"},
+        {"CREATE USER foo HASH '{\"hash\":\"x\"}';",
+         "CREATE USER foo HASH '***removed***';\n"},
     };
 
     TSetup setup;
