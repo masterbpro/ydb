@@ -1,0 +1,43 @@
+[
+  {
+    "part": 1,
+    "pool": "/masked_pool",
+    "req_id": "/masked_req_id",
+    "request": {
+      "action": "QUERY_ACTION_EXECUTE",
+      "application": "/masked_application",
+      "chunk": 1,
+      "client_address": "/masked_client_address",
+      "compile_cache_hit": "/masked_compile_cache_hit",
+      "consumed_ru": "/masked_consumed_ru",
+      "cpu_time_us": "/masked_cpu_time_us",
+      "data": "SELECT 'canon_generic_query_marker_v1' AS v",
+      "database": "/masked_database",
+      "duration_ms": "/masked_duration_ms",
+      "event": "completed",
+      "query_type": "QUERY_TYPE_SQL_GENERIC_QUERY",
+      "status": "SUCCESS"
+    },
+    "session": "/masked_session",
+    "total": 1,
+    "user": "/masked_user"
+  },
+  {
+    "part": 1,
+    "pool": "/masked_pool",
+    "req_id": "/masked_req_id",
+    "request": {
+      "action": "QUERY_ACTION_EXECUTE",
+      "application": "/masked_application",
+      "chunk": 1,
+      "client_address": "/masked_client_address",
+      "data": "SELECT 'canon_generic_query_marker_v1' AS v",
+      "database": "/masked_database",
+      "event": "started",
+      "query_type": "QUERY_TYPE_SQL_GENERIC_QUERY"
+    },
+    "session": "/masked_session",
+    "total": 1,
+    "user": "/masked_user"
+  }
+]

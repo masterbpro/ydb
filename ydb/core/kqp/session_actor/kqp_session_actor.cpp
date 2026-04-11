@@ -354,6 +354,8 @@ public:
     }
 
     void ForwardRequest(TEvKqp::TEvQueryRequest::TPtr& ev) {
+        // Snapshot fields needed for the "completed" log entry before RequestEv is released
+        // below — after forwarding, QueryState->RequestEv is null and these accessors would crash.
         if (KQP_REQ_LOG_ENABLED()) {
             ForwardedQueryText = QueryState->ExtractQueryText();
             ForwardedDatabase = QueryState->GetDatabase();
@@ -3078,6 +3080,9 @@ public:
             TlsActivationContext->AsActorContext()
         );
 
+        // Skip when RequestEv is null: the request was forwarded to KqpWorkerActor and
+        // already logged by ForwardResponse via LogForwardedCompleted. Logging here would
+        // both duplicate the entry and crash accessing fields owned by the released RequestEv.
         if (KQP_REQ_LOG_ENABLED() && QueryState->RequestEv) {
             TLogQuery::LogCompleted(*QueryState, record, CurrentReqLogId);
         }

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import copy
 import glob
 import json
 import logging
@@ -697,6 +698,97 @@ def _verify_chunked_query(entries, marker, event, min_chunks=5):
         "Reassembled chunks should contain the full marker"
 
     return all_chunks
+
+
+# Keys in the REQ_JSON envelope whose values vary across runs (session ids,
+# pointers, generated timestamps) and must be replaced before canonization.
+_VOLATILE_ENVELOPE_KEYS = ('req_id', 'pool', 'session', 'user')
+
+# Keys inside the "request" sub-object that vary across runs (wallclock-based
+# stats, database path that depends on the test fixture, transport metadata).
+_VOLATILE_REQUEST_KEYS = (
+    'database',
+    'application',
+    'client_address',
+    'duration_ms',
+    'cpu_time_us',
+    'compile_cache_hit',
+    'consumed_ru',
+    'read_rows',
+    'read_bytes',
+    'write_rows',
+    'write_bytes',
+    'affected_shards',
+    'parameters_size',
+)
+
+
+def _placeholder(key):
+    return '/masked_' + key
+
+
+def _sanitize_entry(entry):
+    """Return a copy of a REQ_JSON entry with non-deterministic fields replaced
+    by field-specific placeholders, so that the result is safe to canonize."""
+    e = copy.deepcopy(entry)
+    for key in _VOLATILE_ENVELOPE_KEYS:
+        if key in e:
+            e[key] = _placeholder(key)
+    req = e.get('request')
+    if isinstance(req, dict):
+        for key in _VOLATILE_REQUEST_KEYS:
+            if key in req:
+                req[key] = _placeholder(key)
+        # "tables" carries per-table counters that depend on plan/runtime and
+        # cannot be canonized; drop it entirely if present.
+        req.pop('tables', None)
+    return e
+
+
+def _canonize_entries(entries, marker):
+    """Filter log entries by marker, sanitize them and sort deterministically."""
+    matching = _find_entries_by_marker(entries, marker)
+    sanitized = [_sanitize_entry(e) for e in matching]
+    # Sort by (event, chunk) to get a stable order independent of log interleaving.
+    sanitized.sort(key=lambda e: (
+        e.get('request', {}).get('event', ''),
+        e.get('request', {}).get('chunk', 0),
+    ))
+    return sanitized
+
+
+class TestCanonical:
+    """Canonization test for the REQ_JSON log schema.
+
+    Runs a deterministic query and compares a sanitized snapshot of the
+    produced log entries against a stored canonical file. Any schema drift
+    (new fields, renamed fields, structural changes) forces the developer to
+    re-canonize with `ya make -Z`, which makes the change reviewable.
+
+    Volatile fields (session id, req_id, durations, database path, per-table
+    counters) are replaced with <MASKED> placeholders before comparison;
+    only the stable schema and the literal query text remain.
+    """
+
+    def test_canonical_generic_query(self, ydb_setup):
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        marker = 'canon_generic_query_marker_v1'
+        query_pool = ydb.QuerySessionPool(driver)
+        query_pool.execute_with_retries(
+            "SELECT '%s' AS v" % marker
+        )
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+        sanitized = _canonize_entries(entries, marker)
+
+        # Expect exactly one "started" and one "completed" entry, single-chunk.
+        assert len(sanitized) == 2, \
+            "Expected 2 canonical entries (started+completed), got %d" % len(sanitized)
+
+        return json.dumps(sanitized, sort_keys=True, indent=2)
 
 
 class TestLongQueryChunking:

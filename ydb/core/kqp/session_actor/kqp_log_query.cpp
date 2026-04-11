@@ -102,7 +102,8 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
             json.WriteKey("issues").WriteString(issues.ToOneLineString());
         }
 
-        // Write extra metadata only in the first chunk
+        // Emit metadata (database, query_type, stats, etc.) only in the first chunk so
+        // log aggregators don't receive N duplicated copies for a multi-chunk query.
         if (i == 0) {
             if (extra.Database) {
                 json.WriteKey("database").WriteString(extra.Database);
@@ -198,8 +199,13 @@ TString MakeRequestId(const TKqpQueryState& state) {
     return res;
 }
 
-// Internal AST types produced by KqpWorkerActor after compiling a scripting query.
-// These are not logged: the original SQL text is already in the scripting query log entry.
+// A scripting query (QUERY_TYPE_SQL_SCRIPT / _SCRIPT_STREAMING) is forwarded from the
+// session actor to KqpWorkerActor, which splits it into one or more AST sub-queries
+// (QUERY_TYPE_AST_DML / _AST_SCAN) and re-enters the normal query pipeline — so LogStarted
+// and LogCompleted get called again for each sub-query. We suppress those sub-query
+// entries: the user-visible request is the original scripting query, and it is logged
+// once by the session actor via LogForwardedCompleted. Without this, every scripting
+// query would produce a burst of confusing internal AST log entries.
 bool IsAstQueryType(NKikimrKqp::EQueryType type) {
     return type == NKikimrKqp::QUERY_TYPE_AST_DML
         || type == NKikimrKqp::QUERY_TYPE_AST_SCAN;
@@ -227,9 +233,10 @@ TString MaskSensitiveLiterals(const TString& query) {
 }
 
 TString TLogQuery::LogStarted(const TKqpQueryState& state) {
+    // See IsAstQueryType: these are internal sub-queries of a scripting request and
+    // must not appear in the log. Returning an empty req_id also signals to the caller
+    // that no "completed" entry should be written for this state.
     if (IsAstQueryType(state.GetType())) {
-        // AST queries are compiled from scripting queries — suppress "started" to avoid
-        // duplicate logging; "completed" will be emitted using the scripting query req_id.
         return {};
     }
 
@@ -283,6 +290,8 @@ TString TLogQuery::LogStarted(const TKqpQueryState& state) {
 void TLogQuery::LogCompleted(const TKqpQueryState& state,
                               const NKikimrKqp::TEvQueryResponse& record,
                               const TString& reqId) {
+    // Mirror the suppression in LogStarted: AST sub-queries of a scripting request
+    // must not produce "completed" entries either.
     if (IsAstQueryType(state.GetType())) {
         return;
     }
@@ -298,6 +307,11 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
 
         auto query = state.ExtractQueryText();
 
+        // Two masking paths depending on how far the query got:
+        //  - PreparedQuery present: compilation succeeded, so we can inspect the physical
+        //    query AST and precisely mask literals only when the query touches secrets/users.
+        //  - No PreparedQuery (compile failure / early reject): fall back to the lexical
+        //    heuristic IsQueryAllowedToLog and suppress the whole text if it looks sensitive.
         TString queryText;
         if (state.PreparedQuery) {
             if (HasSensitiveSchemeOperation(state.PreparedQuery->GetPhysicalQuery())) {

@@ -62,8 +62,15 @@ public:
                              const NKikimrKqp::TEvQueryResponse& record,
                              const TString& reqId);
 
-    // For scripting queries forwarded to KqpWorkerActor: RequestEv is released
-    // before the response arrives, so we log using saved fields instead.
+    // Special "completed" path for scripting queries (QUERY_TYPE_SQL_SCRIPT /
+    // _SCRIPT_STREAMING). The session actor forwards such requests to KqpWorkerActor,
+    // which releases RequestEv during the handoff — so by the time the response arrives
+    // LogCompleted can no longer access QueryState fields. The caller must snapshot the
+    // required fields before forwarding and pass them here, together with the req_id
+    // returned by the original LogStarted call so the "started"/"completed" pair stays
+    // correlated. AST sub-queries produced internally by KqpWorkerActor are filtered
+    // out in LogStarted/LogCompleted, so this is the only "completed" entry the
+    // scripting request produces.
     static void LogForwardedCompleted(const TString& queryText,
                                       const TString& database,
                                       NKikimrKqp::EQueryType queryType,
