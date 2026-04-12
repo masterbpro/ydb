@@ -96,15 +96,15 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
         json.WriteKey("pool").WriteString(poolId);
         json.WriteKey("session").WriteString(sessionId);
         json.WriteKey("user").WriteString(userSID);
-        json.WriteKey("part").WriteInt(i + 1);
-        json.WriteKey("total").WriteInt(total);
-
-        json.WriteKey("request").BeginObject();
         json.WriteKey("event").WriteString(eventName);
         json.WriteKey("chunk").WriteInt(i + 1);
+        json.WriteKey("total").WriteInt(total);
+        if (i + 1 == total) {
+            json.WriteKey("last_chunk").WriteBool(true);
+        }
 
         if (!chunks[i].empty()) {
-            json.WriteKey("data").WriteString(chunks[i]);
+            json.WriteKey("query_text").WriteString(chunks[i]);
         }
 
         if (!issues.Empty()) {
@@ -200,7 +200,6 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
             }
         }
 
-        json.EndObject();
         json.EndObject();
 
         _KQP_REQ_LOG(ss.Str());

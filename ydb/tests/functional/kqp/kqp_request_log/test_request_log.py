@@ -63,16 +63,15 @@ def _collect_req_json_entries(cluster):
 
 
 def _find_entries_by_marker(entries, marker, event=None, query_type=None):
-    """Find entries containing marker in data, optionally filtered by event/query_type."""
+    """Find entries containing marker in query_text, optionally filtered by event/query_type."""
     result = []
     for e in entries:
-        req = e.get('request', {})
-        data = req.get('data', '')
+        data = e.get('query_text', '')
         if marker not in data:
             continue
-        if event and req.get('event') != event:
+        if event and e.get('event') != event:
             continue
-        if query_type and req.get('query_type') != query_type:
+        if query_type and e.get('query_type') != query_type:
             continue
         result.append(e)
     return result
@@ -190,7 +189,7 @@ class TestQueryService:
         assert len(completed) >= 1
 
         entry = completed[0]
-        req = entry['request']
+        req = entry
         assert req.get('database'), "Expected database in completed entry"
         assert req.get('action'), "Expected action in completed entry"
         assert req.get('status') == 'SUCCESS'
@@ -218,7 +217,7 @@ class TestQueryService:
         )
         assert len(completed) >= 1, \
             "Expected completed entry for failed query"
-        assert completed[0]['request'].get('status') != 'SUCCESS'
+        assert completed[0].get('status') != 'SUCCESS'
 
 
 class TestDataService:
@@ -242,14 +241,14 @@ class TestDataService:
             entries, 'data_svc_select', event='started',
         )
         assert len(started) >= 1
-        assert started[0]['request'].get('query_type') == \
+        assert started[0].get('query_type') == \
             'QUERY_TYPE_SQL_DML'
 
         completed = _find_entries_by_marker(
             entries, 'data_svc_select', event='completed',
         )
         assert len(completed) >= 1
-        assert completed[0]['request'].get('status') == 'SUCCESS'
+        assert completed[0].get('status') == 'SUCCESS'
 
     def test_prepared_query(self, ydb_setup):
         driver, database_path, table_path, pool, cluster = ydb_setup
@@ -271,9 +270,9 @@ class TestDataService:
             entries, 'prepared_query_test', event='completed',
         )
         assert len(completed) >= 1
-        assert completed[0]['request'].get('query_type') == \
+        assert completed[0].get('query_type') == \
             'QUERY_TYPE_SQL_DML'
-        assert completed[0]['request'].get('status') == 'SUCCESS'
+        assert completed[0].get('status') == 'SUCCESS'
 
     def test_data_query_upsert(self, ydb_setup):
         driver, database_path, table_path, pool, cluster = ydb_setup
@@ -294,7 +293,7 @@ class TestDataService:
             entries, 'upsert_log_test', event='completed',
         )
         assert len(completed) >= 1
-        assert completed[0]['request'].get('status') == 'SUCCESS'
+        assert completed[0].get('status') == 'SUCCESS'
 
 
 class TestScanQuery:
@@ -318,14 +317,14 @@ class TestScanQuery:
             entries, 'scan_test_marker', event='started',
         )
         assert len(started) >= 1
-        assert started[0]['request'].get('query_type') == \
+        assert started[0].get('query_type') == \
             'QUERY_TYPE_SQL_SCAN'
 
         completed = _find_entries_by_marker(
             entries, 'scan_test_marker', event='completed',
         )
         assert len(completed) >= 1
-        assert completed[0]['request'].get('status') == 'SUCCESS'
+        assert completed[0].get('status') == 'SUCCESS'
 
 
 class TestScriptingService:
@@ -369,7 +368,7 @@ class TestScriptingService:
             entries, 'scripting_type_test', event='started',
         )
         assert len(started) >= 1
-        assert started[0]['request'].get('query_type') == \
+        assert started[0].get('query_type') == \
             'QUERY_TYPE_SQL_SCRIPT'
 
     def test_scripting_req_id_correlation(self, ydb_setup):
@@ -413,8 +412,8 @@ class TestScriptingService:
             entries, 'scripting_status_test', event='completed',
         )
         assert len(completed) >= 1
-        assert completed[0]['request'].get('status') == 'SUCCESS'
-        assert completed[0]['request'].get('duration_us') is not None
+        assert completed[0].get('status') == 'SUCCESS'
+        assert completed[0].get('duration_us') is not None
 
 
 class TestDdlService:
@@ -443,14 +442,14 @@ class TestDdlService:
             entries, 'ddl_log_test_table', event='started',
         )
         assert len(started) >= 1
-        assert started[0]['request'].get('query_type') == \
+        assert started[0].get('query_type') == \
             'QUERY_TYPE_SQL_DDL'
 
         completed = _find_entries_by_marker(
             entries, 'ddl_log_test_table', event='completed',
         )
         assert len(completed) >= 1
-        assert completed[0]['request'].get('status') == 'SUCCESS'
+        assert completed[0].get('status') == 'SUCCESS'
 
     def test_ddl_drop_table_logged(self, ydb_setup):
         driver, database_path, table_path, pool, cluster = ydb_setup
@@ -480,10 +479,10 @@ class TestDdlService:
             entries, 'ddl_drop_log_test', event='completed',
         )
         drop_entries = [
-            e for e in completed if 'DROP' in e['request'].get('data', '')
+            e for e in completed if 'DROP' in e.get('query_text', '')
         ]
         assert len(drop_entries) >= 1
-        assert drop_entries[0]['request'].get('status') == 'SUCCESS'
+        assert drop_entries[0].get('status') == 'SUCCESS'
 
 
 class TestStreamingScriptingService:
@@ -529,7 +528,7 @@ class TestStreamingScriptingService:
             entries, 'stream_type_test', event='started',
         )
         assert len(started) >= 1
-        assert started[0]['request'].get('query_type') == \
+        assert started[0].get('query_type') == \
             'QUERY_TYPE_SQL_SCRIPT_STREAMING'
 
     def test_streaming_yql_req_id_correlation(self, ydb_setup):
@@ -652,14 +651,11 @@ class TestLogStructure:
             assert 'pool' in entry, "Missing pool"
             assert 'session' in entry, "Missing session"
             assert 'user' in entry, "Missing user"
-            assert 'part' in entry, "Missing part"
             assert 'total' in entry, "Missing total"
-            assert 'request' in entry, "Missing request"
             assert 'timestamp' in entry, "Missing timestamp"
-            req = entry['request']
-            assert 'event' in req, "Missing event"
-            assert req['event'] in ('started', 'completed')
-            assert 'chunk' in req, "Missing chunk number"
+            assert 'event' in entry, "Missing event"
+            assert entry['event'] in ('started', 'completed')
+            assert 'chunk' in entry, "Missing chunk number"
 
     def test_started_has_timestamp_no_end_time(self, ydb_setup):
         driver, database_path, table_path, _, cluster = ydb_setup
@@ -771,7 +767,7 @@ def _verify_chunked_query(entries, marker, event, min_chunks=5):
     all_chunks = [
         e for e in entries
         if e.get('req_id') == req_id
-        and e['request'].get('event') == event
+        and e.get('event') == event
     ]
 
     expected_total = all_chunks[0]['total']
@@ -780,17 +776,13 @@ def _verify_chunked_query(entries, marker, event, min_chunks=5):
     assert len(all_chunks) == expected_total, \
         "Expected %d chunks, got %d" % (expected_total, len(all_chunks))
 
-    parts = sorted(e['part'] for e in all_chunks)
-    assert parts == list(range(1, expected_total + 1)), \
-        "Chunk parts should be sequential: %s" % parts
-
-    for e in all_chunks:
-        assert e['request'].get('chunk') == e['part'], \
-            "request.chunk should match part"
+    chunks = sorted(e['chunk'] for e in all_chunks)
+    assert chunks == list(range(1, expected_total + 1)), \
+        "Chunks should be sequential: %s" % chunks
 
     reassembled = ''.join(
-        e['request'].get('data', '')
-        for e in sorted(all_chunks, key=lambda x: x['part'])
+        e.get('query_text', '')
+        for e in sorted(all_chunks, key=lambda x: x['chunk'])
     )
     assert marker in reassembled, \
         "Reassembled chunks should contain the full marker"
@@ -798,13 +790,11 @@ def _verify_chunked_query(entries, marker, event, min_chunks=5):
     return all_chunks
 
 
-# Keys in the REQ_JSON envelope whose values vary across runs (session ids,
-# pointers, generated timestamps) and must be replaced before canonization.
-_VOLATILE_ENVELOPE_KEYS = ('req_id', 'pool', 'session', 'user', 'timestamp', 'end_time')
-
-# Keys inside the "request" sub-object that vary across runs (wallclock-based
-# stats, database path that depends on the test fixture, transport metadata).
-_VOLATILE_REQUEST_KEYS = (
+# Keys whose values vary across runs (session ids, pointers, generated
+# timestamps, wallclock-based stats, database path, transport metadata)
+# and must be replaced before canonization.
+_VOLATILE_KEYS = (
+    'req_id', 'pool', 'session', 'user', 'timestamp', 'end_time',
     'database',
     'database_id',
     'cluster',
@@ -834,17 +824,12 @@ def _sanitize_entry(entry):
     """Return a copy of a REQ_JSON entry with non-deterministic fields replaced
     by field-specific placeholders, so that the result is safe to canonize."""
     e = copy.deepcopy(entry)
-    for key in _VOLATILE_ENVELOPE_KEYS:
+    for key in _VOLATILE_KEYS:
         if key in e:
             e[key] = _placeholder(key)
-    req = e.get('request')
-    if isinstance(req, dict):
-        for key in _VOLATILE_REQUEST_KEYS:
-            if key in req:
-                req[key] = _placeholder(key)
-        # "tables" carries per-table counters that depend on plan/runtime and
-        # cannot be canonized; drop it entirely if present.
-        req.pop('tables', None)
+    # "tables" carries per-table counters that depend on plan/runtime and
+    # cannot be canonized; drop it entirely if present.
+    e.pop('tables', None)
     return e
 
 
@@ -854,8 +839,8 @@ def _canonize_entries(entries, marker):
     sanitized = [_sanitize_entry(e) for e in matching]
     # Sort by (event, chunk) to get a stable order independent of log interleaving.
     sanitized.sort(key=lambda e: (
-        e.get('request', {}).get('event', ''),
-        e.get('request', {}).get('chunk', 0),
+        e.get('event', ''),
+        e.get('chunk', 0),
     ))
     return sanitized
 
@@ -913,6 +898,37 @@ class TestCanonical:
 
         assert len(sanitized) == 2, \
             "Expected 2 canonical entries (started+completed), got %d" % len(sanitized)
+
+        return json.dumps(sanitized, sort_keys=True, indent=2)
+
+    def test_canonical_chunked_query(self, ydb_setup):
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        # 5000-char marker produces 2 chunks (SQL_TEXT_MAX_SIZE = 4000).
+        marker = 'canon_chunked_' + 'X' * 4986
+        query_pool = ydb.QuerySessionPool(driver)
+        query_pool.execute_with_retries(
+            "SELECT '%s' AS v" % marker
+        )
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+
+        # Find first chunks by marker, then collect all chunks with same req_id.
+        first_chunks = _find_entries_by_marker(entries, marker[:100])
+        assert len(first_chunks) >= 1, "No entries found for chunked marker"
+        req_ids = set(e['req_id'] for e in first_chunks)
+        all_entries = [e for e in entries if e.get('req_id') in req_ids]
+
+        sanitized = [_sanitize_entry(e) for e in all_entries]
+        sanitized.sort(key=lambda e: (
+            e.get('event', ''),
+            e.get('chunk', 0),
+        ))
+
+        assert len(sanitized) == 4, \
+            "Expected 4 canonical entries (2 started + 2 completed chunks), got %d" % len(sanitized)
 
         return json.dumps(sanitized, sort_keys=True, indent=2)
 
