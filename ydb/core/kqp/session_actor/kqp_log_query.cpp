@@ -33,6 +33,10 @@ struct TTableStat {
 
 struct TJsonExtra {
     TStringBuf Database;
+    TStringBuf DatabaseId;
+    TString Cluster;
+    ui32 NodeId = 0;
+    TString NodeName;
     TString QueryType;
     TString Action;
     TString ApplicationName;
@@ -57,7 +61,8 @@ struct TJsonExtra {
 void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf sessionId, TStringBuf userSID,
                      TStringBuf eventName, TStringBuf requestText,
                      const NYql::TIssues& issues,
-                     const TJsonExtra& extra)
+                     const TJsonExtra& extra,
+                     TInstant timestamp, TMaybe<TInstant> endTime = Nothing())
 {
     // Split requestText into UTF-8-safe chunks using standard Utf8TruncateRobust
     std::vector<TStringBuf> chunks;
@@ -83,7 +88,10 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
         NJsonWriter::TBuf json(NJsonWriter::HEM_RELAXED, &ss);
 
         json.BeginObject();
-        json.WriteKey("timestamp").WriteString(TActivationContext::Now().ToString());
+        json.WriteKey("timestamp").WriteString(timestamp.ToString());
+        if (endTime) {
+            json.WriteKey("end_time").WriteString(endTime->ToString());
+        }
         json.WriteKey("req_id").WriteString(reqId);
         json.WriteKey("pool").WriteString(poolId);
         json.WriteKey("session").WriteString(sessionId);
@@ -108,6 +116,18 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
         if (i == 0) {
             if (extra.Database) {
                 json.WriteKey("database").WriteString(extra.Database);
+            }
+            if (extra.DatabaseId) {
+                json.WriteKey("database_id").WriteString(extra.DatabaseId);
+            }
+            if (extra.Cluster) {
+                json.WriteKey("cluster").WriteString(extra.Cluster);
+            }
+            if (extra.NodeId > 0) {
+                json.WriteKey("node_id").WriteULongLong(extra.NodeId);
+            }
+            if (extra.NodeName) {
+                json.WriteKey("node_name").WriteString(extra.NodeName);
             }
             if (extra.QueryType) {
                 json.WriteKey("query_type").WriteString(extra.QueryType);
@@ -264,6 +284,12 @@ TString TLogQuery::LogStarted(const TKqpQueryState& state) {
 
         TJsonExtra extra;
         extra.Database = state.GetDatabase();
+        if (state.UserRequestContext) {
+            extra.DatabaseId = state.UserRequestContext->DatabaseId;
+        }
+        extra.Cluster = state.Cluster;
+        extra.NodeId = TlsActivationContext->ActorSystem()->NodeId;
+        extra.NodeName = AppData()->NodeName;
         extra.QueryType = NKikimrKqp::EQueryType_Name(state.GetType());
         extra.Action = NKikimrKqp::EQueryAction_Name(state.GetAction());
         extra.ApplicationName = state.ApplicationName.GetOrElse(TString{});
@@ -281,7 +307,8 @@ TString TLogQuery::LogStarted(const TKqpQueryState& state) {
             "started",
             queryText,
             {},
-            extra
+            extra,
+            state.StartTime
         );
     });
     log.Log();
@@ -298,6 +325,8 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
     }
 
     TLogQuery log([&state, &record, &reqId]() {
+        const auto now = TActivationContext::Now();
+
         TStringBuf sessionId = state.UserRequestContext
             ? TStringBuf(state.UserRequestContext->SessionId)
             : TStringBuf{};
@@ -340,6 +369,12 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
 
         TJsonExtra extra;
         extra.Database = state.GetDatabase();
+        if (state.UserRequestContext) {
+            extra.DatabaseId = state.UserRequestContext->DatabaseId;
+        }
+        extra.Cluster = state.Cluster;
+        extra.NodeId = TlsActivationContext->ActorSystem()->NodeId;
+        extra.NodeName = AppData()->NodeName;
         extra.QueryType = NKikimrKqp::EQueryType_Name(state.GetType());
         extra.Action = NKikimrKqp::EQueryAction_Name(state.GetAction());
         extra.ApplicationName = state.ApplicationName.GetOrElse(TString{});
@@ -349,7 +384,7 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
         }
         extra.ParametersSize = state.ParametersSize;
         extra.Status = Ydb::StatusIds::StatusCode_Name(record.GetYdbStatus());
-        extra.DurationUs = (TActivationContext::Now() - state.StartTime).MicroSeconds();
+        extra.DurationUs = (now - state.StartTime).MicroSeconds();
         extra.CpuTimeUs = state.CpuTime.MicroSeconds();
         extra.CompileCacheHit = state.CompileStats.FromCache ? 1 : 0;
         extra.ConsumedRu = record.GetConsumedRu();
@@ -384,7 +419,9 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
             "completed",
             queryText,
             issues,
-            extra
+            extra,
+            state.StartTime,
+            now
         );
     });
     log.Log();
@@ -398,12 +435,16 @@ void TLogQuery::LogForwardedCompleted(const TString& queryText,
                                        const NKikimrKqp::TEvQueryResponse& record,
                                        const TString& reqId) {
     TLogQuery log([&]() {
+        const auto now = TActivationContext::Now();
+
         TJsonExtra extra;
         extra.Database = database;
+        extra.NodeId = TlsActivationContext->ActorSystem()->NodeId;
+        extra.NodeName = AppData()->NodeName;
         extra.QueryType = NKikimrKqp::EQueryType_Name(queryType);
         extra.Action = NKikimrKqp::EQueryAction_Name(queryAction);
         extra.Status = Ydb::StatusIds::StatusCode_Name(record.GetYdbStatus());
-        extra.DurationUs = (TActivationContext::Now() - startTime).MicroSeconds();
+        extra.DurationUs = (now - startTime).MicroSeconds();
 
         NYql::TIssues issues;
         TStringBuf poolId;
@@ -414,7 +455,8 @@ void TLogQuery::LogForwardedCompleted(const TString& queryText,
 
         TString loggedText = IsQueryAllowedToLog(queryText) ? queryText : TString(SENSITIVE_QUERY_PLACEHOLDER);
 
-        WriteJsonChunks(poolId, reqId, {}, {}, "completed", loggedText, issues, extra);
+        WriteJsonChunks(poolId, reqId, {}, {}, "completed", loggedText, issues, extra,
+                        startTime, now);
     });
     log.Log();
 }

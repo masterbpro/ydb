@@ -655,10 +655,108 @@ class TestLogStructure:
             assert 'part' in entry, "Missing part"
             assert 'total' in entry, "Missing total"
             assert 'request' in entry, "Missing request"
+            assert 'timestamp' in entry, "Missing timestamp"
             req = entry['request']
             assert 'event' in req, "Missing event"
             assert req['event'] in ('started', 'completed')
             assert 'chunk' in req, "Missing chunk number"
+
+    def test_started_has_timestamp_no_end_time(self, ydb_setup):
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        query_pool = ydb.QuerySessionPool(driver)
+        query_pool.execute_with_retries(
+            "SELECT 'ts_started_test' AS marker"
+        )
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+
+        started = _find_entries_by_marker(
+            entries, 'ts_started_test', event='started',
+        )
+        assert len(started) >= 1
+        entry = started[0]
+        assert 'timestamp' in entry, \
+            "started entry must have timestamp (query start time)"
+        assert 'end_time' not in entry, \
+            "started entry must NOT have end_time"
+
+    def test_completed_has_timestamp_and_end_time(self, ydb_setup):
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        query_pool = ydb.QuerySessionPool(driver)
+        query_pool.execute_with_retries(
+            "SELECT 'ts_completed_test' AS marker"
+        )
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+
+        completed = _find_entries_by_marker(
+            entries, 'ts_completed_test', event='completed',
+        )
+        assert len(completed) >= 1
+        entry = completed[0]
+        assert 'timestamp' in entry, \
+            "completed entry must have timestamp (query start time)"
+        assert 'end_time' in entry, \
+            "completed entry must have end_time"
+
+    def test_timestamp_precedes_end_time(self, ydb_setup):
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        query_pool = ydb.QuerySessionPool(driver)
+        query_pool.execute_with_retries(
+            "SELECT 'ts_order_test' AS marker"
+        )
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+
+        completed = _find_entries_by_marker(
+            entries, 'ts_order_test', event='completed',
+        )
+        assert len(completed) >= 1
+        entry = completed[0]
+        assert entry['timestamp'] <= entry['end_time'], \
+            "timestamp (start) must be <= end_time"
+
+    def test_started_and_completed_share_timestamp(self, ydb_setup):
+        """started.timestamp and completed.timestamp must be the same
+        (both represent query start time)."""
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        query_pool = ydb.QuerySessionPool(driver)
+        query_pool.execute_with_retries(
+            "SELECT 'ts_match_test' AS marker"
+        )
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+
+        started = _find_entries_by_marker(
+            entries, 'ts_match_test', event='started',
+        )
+        completed = _find_entries_by_marker(
+            entries, 'ts_match_test', event='completed',
+        )
+        assert len(started) >= 1
+        assert len(completed) >= 1
+
+        # Match by req_id
+        req_id = started[0]['req_id']
+        matched_completed = [
+            e for e in completed if e['req_id'] == req_id
+        ]
+        assert len(matched_completed) == 1
+
+        assert started[0]['timestamp'] == matched_completed[0]['timestamp'], \
+            "started and completed should have the same timestamp (query start time)"
 
 
 def _verify_chunked_query(entries, marker, event, min_chunks=5):
@@ -702,12 +800,16 @@ def _verify_chunked_query(entries, marker, event, min_chunks=5):
 
 # Keys in the REQ_JSON envelope whose values vary across runs (session ids,
 # pointers, generated timestamps) and must be replaced before canonization.
-_VOLATILE_ENVELOPE_KEYS = ('req_id', 'pool', 'session', 'user')
+_VOLATILE_ENVELOPE_KEYS = ('req_id', 'pool', 'session', 'user', 'timestamp', 'end_time')
 
 # Keys inside the "request" sub-object that vary across runs (wallclock-based
 # stats, database path that depends on the test fixture, transport metadata).
 _VOLATILE_REQUEST_KEYS = (
     'database',
+    'database_id',
+    'cluster',
+    'node_id',
+    'node_name',
     'application',
     'client_address',
     'duration_us',
@@ -720,6 +822,7 @@ _VOLATILE_REQUEST_KEYS = (
     'write_bytes',
     'affected_shards',
     'parameters_size',
+    'issues',
 )
 
 
@@ -785,6 +888,29 @@ class TestCanonical:
         sanitized = _canonize_entries(entries, marker)
 
         # Expect exactly one "started" and one "completed" entry, single-chunk.
+        assert len(sanitized) == 2, \
+            "Expected 2 canonical entries (started+completed), got %d" % len(sanitized)
+
+        return json.dumps(sanitized, sort_keys=True, indent=2)
+
+    def test_canonical_error_query(self, ydb_setup):
+        driver, database_path, table_path, _, cluster = ydb_setup
+
+        marker = 'canon_error_query_marker_v1'
+        query_pool = ydb.QuerySessionPool(driver)
+        try:
+            query_pool.execute_with_retries(
+                "SELECT '%s' FROM non_existent_table_12345" % marker,
+                retry_settings=ydb.RetrySettings(max_retries=0),
+            )
+        except ydb.Error:
+            pass
+        query_pool.stop()
+
+        time.sleep(0.5)
+        entries = _collect_req_json_entries(cluster)
+        sanitized = _canonize_entries(entries, marker)
+
         assert len(sanitized) == 2, \
             "Expected 2 canonical entries (started+completed), got %d" % len(sanitized)
 
