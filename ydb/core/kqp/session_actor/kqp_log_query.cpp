@@ -41,7 +41,7 @@ struct TJsonExtra {
     ui64 ParametersSize = 0;
     // Completed-only fields
     TString Status;
-    i64 DurationMs = -1;
+    i64 DurationUs = -1;
     i64 CpuTimeUs = -1;
     i8 CompileCacheHit = -1; // -1 unknown, 0 miss, 1 hit
     // Execution stats (completed-only)
@@ -83,6 +83,7 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
         NJsonWriter::TBuf json(NJsonWriter::HEM_RELAXED, &ss);
 
         json.BeginObject();
+        json.WriteKey("timestamp").WriteString(TActivationContext::Now().ToString());
         json.WriteKey("req_id").WriteString(reqId);
         json.WriteKey("pool").WriteString(poolId);
         json.WriteKey("session").WriteString(sessionId);
@@ -129,8 +130,8 @@ void WriteJsonChunks(TStringBuf poolId, const TString& reqId, TStringBuf session
             if (extra.Status) {
                 json.WriteKey("status").WriteString(extra.Status);
             }
-            if (extra.DurationMs >= 0) {
-                json.WriteKey("duration_ms").WriteLongLong(extra.DurationMs);
+            if (extra.DurationUs >= 0) {
+                json.WriteKey("duration_us").WriteLongLong(extra.DurationUs);
             }
             if (extra.CpuTimeUs >= 0) {
                 json.WriteKey("cpu_time_us").WriteLongLong(extra.CpuTimeUs);
@@ -348,7 +349,7 @@ void TLogQuery::LogCompleted(const TKqpQueryState& state,
         }
         extra.ParametersSize = state.ParametersSize;
         extra.Status = Ydb::StatusIds::StatusCode_Name(record.GetYdbStatus());
-        extra.DurationMs = (TActivationContext::Now() - state.StartTime).MilliSeconds();
+        extra.DurationUs = (TActivationContext::Now() - state.StartTime).MicroSeconds();
         extra.CpuTimeUs = state.CpuTime.MicroSeconds();
         extra.CompileCacheHit = state.CompileStats.FromCache ? 1 : 0;
         extra.ConsumedRu = record.GetConsumedRu();
@@ -402,7 +403,7 @@ void TLogQuery::LogForwardedCompleted(const TString& queryText,
         extra.QueryType = NKikimrKqp::EQueryType_Name(queryType);
         extra.Action = NKikimrKqp::EQueryAction_Name(queryAction);
         extra.Status = Ydb::StatusIds::StatusCode_Name(record.GetYdbStatus());
-        extra.DurationMs = (TActivationContext::Now() - startTime).MilliSeconds();
+        extra.DurationUs = (TActivationContext::Now() - startTime).MicroSeconds();
 
         NYql::TIssues issues;
         TStringBuf poolId;

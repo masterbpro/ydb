@@ -194,7 +194,7 @@ class TestQueryService:
         assert req.get('database'), "Expected database in completed entry"
         assert req.get('action'), "Expected action in completed entry"
         assert req.get('status') == 'SUCCESS'
-        assert req.get('duration_ms') is not None
+        assert req.get('duration_us') is not None
         assert 'cpu_time_us' in req
         assert 'compile_cache_hit' in req
 
@@ -414,7 +414,7 @@ class TestScriptingService:
         )
         assert len(completed) >= 1
         assert completed[0]['request'].get('status') == 'SUCCESS'
-        assert completed[0]['request'].get('duration_ms') is not None
+        assert completed[0]['request'].get('duration_us') is not None
 
 
 class TestDdlService:
@@ -710,7 +710,7 @@ _VOLATILE_REQUEST_KEYS = (
     'database',
     'application',
     'client_address',
-    'duration_ms',
+    'duration_us',
     'cpu_time_us',
     'compile_cache_hit',
     'consumed_ru',
